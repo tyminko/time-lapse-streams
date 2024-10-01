@@ -3,8 +3,13 @@ const fs = require('fs')
 const path = require('path')
 const readline = require('readline')
 
-// List of RTSP stream URLs
+// List of RTSP stream URLs (only include the working one)
 const streams = [
+  'rtsp://167.235.64.79:8554/stream1',
+  'rtsp://167.235.64.79:8554/stream2',
+  'rtsp://167.235.64.79:8554/stream3',
+  'rtsp://167.235.64.79:8554/stream4',
+  'rtsp://167.235.64.79:8554/stream5',
   'rtsp://167.235.64.79:8554/stream6',
   'rtsp://167.235.64.79:8554/stream7',
   'rtsp://167.235.64.79:8554/stream8',
@@ -15,11 +20,11 @@ const streams = [
 ]
 
 // Configuration
-const primaryOutputDir = '/media/pi/4A/timelapse_frames'
-const fallbackOutputDir = './timelapse_frames'
+const primaryOutputDir = '/media/pi/4A/time-lapse-frames'
+const fallbackOutputDir = './time-lapse-frames'
 const baseOutputDir = fs.existsSync(primaryOutputDir) ? primaryOutputDir : fallbackOutputDir
 
-const captureInterval = 60000 // Capture a frame every minute (60000 ms) during working hours
+const captureInterval = 60000 // Capture a frame every minute (60000 ms) when stream is available
 const jpegQuality = 80 // JPEG quality (0-100, higher is better quality)
 const outputWidth = 1920 // Output width in pixels (set to -1 or 0 to maintain aspect ratio)
 const outputHeight = 1080 // Output height in pixels (set to -1 or 0 to maintain aspect ratio)
@@ -32,11 +37,16 @@ const workingHoursStart = 12 // 12:00
 const workingHoursEnd = 19 // 19:00
 const morningCheckTime = 10 // 10:00
 
+// Post-working hours check configuration
+const postWorkingHoursChecks = 3 // Number of checks after working hours
+const postWorkingHoursInterval = 5 * 60000 // 10 minutes between post-working hours checks
+
 // Error handling configuration
 const maxRetries = 3 // Maximum number of immediate retries
-const maxBackoffInterval = 3600000 // Maximum backoff interval (1 hour)
+const retryDelay = 5000 // Delay between retries (5 seconds)
 
 let isCapturing = true
+let postWorkingHoursCheckCount = 0 // Counter for post-working hours checks
 
 // Helper function to get current time in Kharkiv
 function getKharkivTime() {
@@ -50,48 +60,63 @@ function isWorkingDay() {
   return kharkivTime.getDay() !== 1 // 1 is Monday
 }
 
-// Helper function to check if it's within working hours
-function isWorkingHours() {
-  const kharkivTime = getKharkivTime()
-  const hours = kharkivTime.getHours()
-  return hours >= workingHoursStart && hours < workingHoursEnd
-}
-
 // Helper function to get next check time
-function getNextCheckTime(failedAttempts) {
+function getNextCheckTime() {
   const kharkivTime = getKharkivTime()
   const currentHour = kharkivTime.getHours()
+  const currentMinute = kharkivTime.getMinutes()
 
   if (isWorkingDay()) {
     if (currentHour >= workingHoursEnd) {
-      // After working hours, wait until next morning check
-      const nextDay = new Date(kharkivTime)
-      nextDay.setDate(nextDay.getDate() + 1)
-      nextDay.setHours(morningCheckTime, 0, 0, 0)
-      return nextDay.getTime() - Date.now()
+      // After working hours
+      if (postWorkingHoursCheckCount < postWorkingHoursChecks) {
+        postWorkingHoursCheckCount++
+        console.log(`Post-working hours check ${postWorkingHoursCheckCount} of ${postWorkingHoursChecks}`)
+        return postWorkingHoursInterval
+      } else {
+        // After post-working hours checks, wait until next morning check
+        const nextDay = new Date(kharkivTime)
+        nextDay.setDate(nextDay.getDate() + 1)
+        nextDay.setHours(morningCheckTime, 0, 0, 0)
+        postWorkingHoursCheckCount = 0 // Reset the counter
+        return nextDay.getTime() - Date.now()
+      }
     } else if (currentHour < morningCheckTime) {
       // Before morning check time
-      return (morningCheckTime - currentHour) * 3600000
+      return (morningCheckTime - currentHour) * 3600000 - currentMinute * 60000
     } else if (currentHour < workingHoursStart) {
       // Between morning check and working hours start
-      const baseInterval = 600000 // 10 minutes
-      const timeUntilStart = (workingHoursStart - currentHour) * 3600000
-      return Math.min(baseInterval * Math.pow(2, failedAttempts), timeUntilStart)
+      const timeUntilStart = (workingHoursStart - currentHour) * 60 - currentMinute
+      if (timeUntilStart <= 30) {
+        return 5 * 60000 // Check every 5 minutes when close to working hours
+      } else if (timeUntilStart <= 60) {
+        return 15 * 60000 // Check every 15 minutes when within an hour of working hours
+      } else {
+        return 30 * 60000 // Check every 30 minutes otherwise
+      }
     } else {
       // During working hours
-      return Math.min(captureInterval * Math.pow(2, failedAttempts), maxBackoffInterval)
+      return captureInterval
     }
   } else {
     // Monday
     if (currentHour >= workingHoursEnd) {
-      // After working hours, wait until next morning
-      const nextDay = new Date(kharkivTime)
-      nextDay.setDate(nextDay.getDate() + 1)
-      nextDay.setHours(morningCheckTime, 0, 0, 0)
-      return nextDay.getTime() - Date.now()
+      // After working hours on Monday, do post-working hours checks
+      if (postWorkingHoursCheckCount < postWorkingHoursChecks) {
+        postWorkingHoursCheckCount++
+        console.log(`Post-working hours check ${postWorkingHoursCheckCount} of ${postWorkingHoursChecks} (Monday)`)
+        return postWorkingHoursInterval
+      } else {
+        // After post-working hours checks, wait until next morning
+        const nextDay = new Date(kharkivTime)
+        nextDay.setDate(nextDay.getDate() + 1)
+        nextDay.setHours(morningCheckTime, 0, 0, 0)
+        postWorkingHoursCheckCount = 0 // Reset the counter
+        return nextDay.getTime() - Date.now()
+      }
     } else {
       // During the day on Monday
-      return Math.min(3600000, (workingHoursEnd - currentHour) * 3600000) // Check every hour or less
+      return 3600000 // Check every hour
     }
   }
 }
@@ -109,6 +134,12 @@ function extractStreamNumber(streamUrl) {
   return match ? match[1] : '0'
 }
 
+function streamName(streamUrl) {
+  const n = extractStreamNumber(streamUrl)
+  const nString = n < 10 ? ` ${n}` : n.toString()
+  return `stream ${nString}`
+}
+
 // Function to generate output path for a frame
 function generateOutputPath(streamUrl, timestamp) {
   const streamNumber = extractStreamNumber(streamUrl)
@@ -121,7 +152,7 @@ function generateOutputPath(streamUrl, timestamp) {
   const seconds = String(date.getSeconds()).padStart(2, '0')
   
   const fileName = `s${streamNumber}-${year}-${month}-${day}-${hours}-${minutes}-${seconds}.jpg`
-  const streamDir = path.join(baseOutputDir, `stream_${streamNumber}`)
+  const streamDir = path.join(baseOutputDir, `stream-${streamNumber}`, `${year}-${month}-${day}`)
   ensureDirectoryExists(streamDir)
   return path.join(streamDir, fileName)
 }
@@ -173,8 +204,13 @@ async function captureFrame(streamUrl) {
         console.log(`${streamName(streamUrl)}: ${outputPath}`)
         resolve(true)
       } else {
-        console.error(`${streamName(streamUrl)}: Failed to capture. Exit code: ${code}`)
-        // console.error(`Error output: ${errorOutput}`)
+        // Check for specific error conditions
+        if (errorOutput.includes("Error opening input file") && 
+            errorOutput.includes("Server returned 404 Not Found")) {
+          console.error(`${streamName(streamUrl)}: Stream not found (404 error)`)
+        } else {
+          console.log(`${streamName(streamUrl)}: Capture failed`)
+        }
         if (fs.existsSync(outputPath)) {
           fs.unlinkSync(outputPath)
         }
@@ -183,48 +219,41 @@ async function captureFrame(streamUrl) {
     })
   })
 }
-function streamName(streamUrl) {
-  return streamUrl.split('/').pop()
-}
-async function captureWithRetry(streamUrl, failedAttempts = 0) {
+
+async function captureWithRetry(streamUrl, retries = 0) {
   const success = await captureFrame(streamUrl)
   
   if (success) {
-    return 0 // Reset failed attempts on success
+    postWorkingHoursCheckCount = 0 // Reset the counter on successful capture
+    return true
+  } else if (retries < maxRetries) {
+    console.log(`${streamName(streamUrl)}: Retry ${retries + 1} of ${maxRetries} in ${retryDelay / 1000} seconds`)
+    await new Promise(resolve => setTimeout(resolve, retryDelay))
+    return captureWithRetry(streamUrl, retries + 1)
   } else {
-    failedAttempts++
-    if (failedAttempts <= maxRetries) {
-      console.log(`${streamName(streamUrl)}: Immediate retry ${failedAttempts} of ${maxRetries}`)
-      return captureWithRetry(streamUrl, failedAttempts)
-    } else {
-      const nextDelay = getNextCheckTime(failedAttempts - maxRetries)
-      console.log(`${streamName(streamUrl)}: Next attempt in ${Math.round(nextDelay / 60000)} minutes`)
-      return failedAttempts
-    }
+    console.log(`${streamName(streamUrl)}: All retries failed`)
+    return false
   }
 }
 
 function startCapture(streamUrl) {
-  let failedAttempts = 0
-
   async function captureAndSchedule() {
     if (!isCapturing) return
 
-    const startTime = Date.now()
-    failedAttempts = await captureWithRetry(streamUrl, failedAttempts)
-    const endTime = Date.now()
-    const elapsedTime = endTime - startTime
+    const success = await captureWithRetry(streamUrl)
 
-    let nextCaptureDelay
-    if (failedAttempts > maxRetries) {
-      nextCaptureDelay = getNextCheckTime(failedAttempts - maxRetries)
-    } else if (isWorkingHours() && isWorkingDay()) {
-      nextCaptureDelay = Math.max(0, captureInterval - elapsedTime)
+    let nextCheckTime
+    if (success) {
+      // If capture was successful, schedule next capture at regular interval
+      nextCheckTime = captureInterval
+      console.log(`${streamName(streamUrl)}: Capture successful, next capture in ${nextCheckTime / 1000} seconds`)
     } else {
-      nextCaptureDelay = getNextCheckTime(0)
+      // If capture failed, use the smart scheduling
+      nextCheckTime = getNextCheckTime()
+      console.log(`${streamName(streamUrl)}: Capture failed, next check in ${Math.round(nextCheckTime / 60000)} minutes`)
     }
 
-    setTimeout(captureAndSchedule, nextCaptureDelay)
+    setTimeout(captureAndSchedule, nextCheckTime)
   }
 
   captureAndSchedule()
@@ -255,21 +284,3 @@ rl.on('line', (input) => {
     rl.close()
   }
 })
-
-/*
-[Unit]
-Description=My Node.js Script
-After=network.target
-
-[Service]
-ExecStart=/usr/bin/node /home/pi/myscript.js
-Restart=always
-User=pi
-Environment=PATH=/usr/bin:/usr/local/bin
-Environment=NODE_ENV=production
-WorkingDirectory=/home/pi
-
-[Install]
-WantedBy=multi-user.target
-
-*/

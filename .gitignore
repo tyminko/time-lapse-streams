@@ -13,3 +13,5 @@ node_modules/
 # Timelapse folders
 timelapse_frames/
 timelapse_videos/
+time-lapse-frames/
+time-lapse-videos/
