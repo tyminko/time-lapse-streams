@@ -1,0 +1,15 @@
+# macOS system files
+.DS_Store
+
+# VS Code settings
+.vscode/
+
+# Node.js dependencies
+node_modules/
+
+# Log files
+*.log
+
+# Timelapse folders
+timelapse_frames/
+timelapse_videos/
